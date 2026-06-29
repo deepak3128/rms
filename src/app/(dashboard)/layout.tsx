@@ -14,13 +14,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { signOut } from "next-auth/react"
-import { LayoutDashboard, ShoppingCart, ChefHat, Receipt, LogOut, Bike, Utensils, Grid3X3, Notebook } from "lucide-react"
+import { LayoutDashboard, ShoppingCart, ChefHat, Receipt, LogOut, Bike, Utensils, Grid3X3, Notebook, Package } from "lucide-react"
 import Link from "next/link"
 
 const roleLinks: Record<string, { href: string; label: string; icon: React.ReactNode }[]> = {
   owner: [
     { href: "/owner", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" /> },
     { href: "/tables", label: "Tables", icon: <Grid3X3 className="h-4 w-4" /> },
+    { href: "/inventory", label: "Inventory", icon: <Package className="h-4 w-4" /> },
     { href: "/waiter", label: "Orders", icon: <ShoppingCart className="h-4 w-4" /> },
     { href: "/menu", label: "Menu", icon: <Notebook className="h-4 w-4" /> },
     { href: "/chef", label: "Kitchen", icon: <ChefHat className="h-4 w-4" /> },
@@ -29,6 +30,7 @@ const roleLinks: Record<string, { href: string; label: string; icon: React.React
   manager: [
     { href: "/owner", label: "Dashboard", icon: <LayoutDashboard className="h-4 w-4" /> },
     { href: "/tables", label: "Tables", icon: <Grid3X3 className="h-4 w-4" /> },
+    { href: "/inventory", label: "Inventory", icon: <Package className="h-4 w-4" /> },
     { href: "/waiter", label: "Orders", icon: <ShoppingCart className="h-4 w-4" /> },
     { href: "/menu", label: "Menu", icon: <Notebook className="h-4 w-4" /> },
     { href: "/chef", label: "Kitchen", icon: <ChefHat className="h-4 w-4" /> },

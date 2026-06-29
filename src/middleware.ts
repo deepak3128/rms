@@ -24,7 +24,9 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith("/chef") ||
     pathname.startsWith("/cashier") ||
     pathname.startsWith("/tables") ||
-    pathname.startsWith("/menu")
+    pathname.startsWith("/inventory") ||
+    pathname === "/menu" ||
+    pathname === "/menu/"
 
   if (isProtectedRoute && !hasSession) {
     const loginUrl = new URL("/login", req.url)
@@ -41,6 +43,6 @@ export async function middleware(req: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|images|menu|$).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|images|$).*)",
   ],
 }
