@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
-import { auth } from "@/lib/auth"
+import { requireAuth } from "@/lib/api-auth"
 
 export async function POST(req: Request) {
   try {
-    const session = await auth()
-    if (!session) {
-      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-    }
+    const { error } = await requireAuth(["owner", "manager", "chef"])
+    if (error) return error
 
     const body = await req.json()
     const { ingredientId, type, quantity, reason, orderId } = body

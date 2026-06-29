@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { prisma } from "@/lib/prisma"
+import { requireAuth } from "@/lib/api-auth"
 
 export async function GET() {
   try {
@@ -17,6 +18,9 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    const { error } = await requireAuth(["owner", "manager"])
+    if (error) return error
+
     const body = await req.json()
     const { name, description, sortOrder } = body
 

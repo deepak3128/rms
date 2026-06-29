@@ -6,7 +6,9 @@
     "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "seed": "tsx prisma/seed/index.ts",
+    "db:reset": "npx prisma db push --force-reset && npm run seed"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
@@ -48,6 +50,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
+    "tsx": "^4.22.4",
     "typescript": "^5"
   }
 }
