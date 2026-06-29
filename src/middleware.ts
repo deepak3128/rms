@@ -22,7 +22,9 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith("/owner") ||
     pathname.startsWith("/waiter") ||
     pathname.startsWith("/chef") ||
-    pathname.startsWith("/cashier")
+    pathname.startsWith("/cashier") ||
+    pathname.startsWith("/tables") ||
+    pathname.startsWith("/menu")
 
   if (isProtectedRoute && !hasSession) {
     const loginUrl = new URL("/login", req.url)
