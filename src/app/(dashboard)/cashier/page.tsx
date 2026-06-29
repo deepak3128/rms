@@ -2,66 +2,113 @@
 
 import { useEffect, useState, useCallback } from "react"
 import { api } from "@/lib/api"
-import type { Order } from "@/types"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { inr } from "@/lib/utils"
+import type { Order, Payment } from "@/types"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
 import { Input } from "@/components/ui/input"
-import { Loader2, QrCode, CreditCard, Banknote, Printer, Search, IndianRupee } from "lucide-react"
-import { toast } from "sonner"
+import { Separator } from "@/components/ui/separator"
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog"
-import { Label } from "@/components/ui/label"
+  Receipt,
+  CheckCircle,
+  CreditCard,
+  QrCode,
+  Banknote,
+  ArrowLeftRight,
+  Loader2,
+  Search,
+  IndianRupee,
+} from "lucide-react"
+import { toast } from "sonner"
+
+declare global {
+  interface Window {
+    Razorpay: new (options: Record<string, unknown>) => { open: () => void }
+  }
+}
 
 export default function CashierPage() {
+  const [orders, setOrders] = useState<Order[]>([])
   const [bills, setBills] = useState<Order[]>([])
-  const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState("")
-  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null)
-  const [paymentModal, setPaymentModal] = useState(false)
+  const [selected, setSelected] = useState<Order | null>(null)
+  const [discount, setDiscount] = useState(0)
+  const [discountReason, setDiscountReason] = useState("")
+  const [generatedBill, setGeneratedBill] = useState<Order | null>(null)
   const [processing, setProcessing] = useState(false)
 
-  const fetchBills = useCallback(async () => {
+  const load = useCallback(async () => {
     try {
-      const data = await api.get<Order[]>("/orders?status=billed,pending")
-      setBills(data)
+      const [o, b] = await Promise.all([
+        api.get<Order[]>("/orders?status=pending,preparing,ready,served"),
+        api.get<Order[]>("/orders?paymentStatus=paid"),
+      ])
+      setOrders(o)
+      setBills(b.slice(0, 8))
     } catch (e) {
-      console.error("Failed to fetch bills", e)
-    } finally {
-      setLoading(false)
+      console.error("Failed to load data", e)
     }
   }, [])
 
   useEffect(() => {
-    fetchBills()
-    const interval = setInterval(fetchBills, 10000)
-    return () => clearInterval(interval)
-  }, [fetchBills])
+    load()
+    const t = setInterval(load, 8000)
+    return () => clearInterval(t)
+  }, [load])
 
-  async function handlePayment(method: string) {
-    if (!selectedOrder) return
+  useEffect(() => {
+    if (!document.getElementById("rzp")) {
+      const s = document.createElement("script")
+      s.id = "rzp"
+      s.src = "https://checkout.razorpay.com/v1/checkout.js"
+      s.async = true
+      document.body.appendChild(s)
+    }
+  }, [])
+
+  const subtotal =
+    selected?.items
+      .filter((i) => i.status !== "cancelled")
+      .reduce((s, i) => s + i.totalPrice, 0) || 0
+  const afterDiscount = Math.max(0, subtotal - discount)
+  const cgst = +(afterDiscount * 0.025).toFixed(2)
+  const sgst = +(afterDiscount * 0.025).toFixed(2)
+  const total = +(afterDiscount + cgst + sgst).toFixed(2)
+
+  async function generateBill() {
+    if (!selected) return
+    setProcessing(true)
+    try {
+      const inv = await api.post<Order>("/billing", {
+        orderId: selected.id,
+        discount,
+        discountReason,
+      })
+      setGeneratedBill(inv)
+      toast.success(`Bill ${(inv as Record<string, unknown>).invoiceNumber} generated`)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to generate bill")
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  async function pay(method: string) {
+    if (!generatedBill) return
     setProcessing(true)
     try {
       await api.post("/payments", {
-        orderId: selectedOrder.id,
-        amount: selectedOrder.grandTotal,
+        orderId: generatedBill.id,
+        amount: generatedBill.grandTotal,
         method,
         isOffline: method === "cash",
       })
-      await api.patch(`/orders/${selectedOrder.id}`, {
+      await api.patch(`/orders/${generatedBill.id}`, {
         paymentStatus: "paid",
         paymentMethod: method,
       })
-      toast.success(`Payment of ₹${selectedOrder.grandTotal} received`)
-      setPaymentModal(false)
-      setSelectedOrder(null)
-      fetchBills()
+      toast.success(`Paid via ${method.toUpperCase()}`)
+      reset()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Payment failed")
     } finally {
@@ -69,190 +116,312 @@ export default function CashierPage() {
     }
   }
 
-  async function handleGenerateBill(order: Order) {
+  async function payRazorpay() {
+    if (!generatedBill) return
+    setProcessing(true)
     try {
-      const invoice = await api.post("/billing", { orderId: order.id })
-      toast.success(`Invoice ${(invoice as Record<string, unknown>).invoiceNumber} generated`)
-      fetchBills()
+      const j = await api.post<Record<string, unknown>>("/payments/razorpay/create-order", {
+        billId: generatedBill.id,
+      })
+
+      if (j.mocked) {
+        toast.info("Razorpay sandbox (mock) — simulating payment")
+        await api.post("/payments/razorpay/verify", {
+          billId: generatedBill.id,
+          razorpayOrderId: j.orderId,
+          razorpayPaymentId: `pay_mock_${Date.now()}`,
+          razorpaySignature: "mock",
+        })
+        toast.success("Razorpay (mock) payment captured")
+        reset()
+        return
+      }
+
+      const rz = new window.Razorpay({
+        key: j.keyId,
+        amount: j.amount,
+        currency: "INR",
+        name: "RMS",
+        description: `Bill ${generatedBill.id.slice(-6)}`,
+        order_id: j.orderId,
+        handler: async (resp: Record<string, string>) => {
+          try {
+            await api.post("/payments/razorpay/verify", {
+              billId: generatedBill.id,
+              razorpayOrderId: resp.razorpay_order_id,
+              razorpayPaymentId: resp.razorpay_payment_id,
+              razorpaySignature: resp.razorpay_signature,
+            })
+            toast.success("Payment captured")
+            reset()
+          } catch (e) {
+            toast.error(e instanceof Error ? e.message : "Verification failed")
+          }
+        },
+        modal: { ondismiss: () => setProcessing(false) },
+      })
+      rz.open()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to generate bill")
+      toast.error(e instanceof Error ? e.message : "Razorpay failed")
+    } finally {
+      setProcessing(false)
     }
   }
 
-  const filtered = bills.filter((b) =>
-    b.tableNumber.toString().includes(search) ||
-    b.id.toLowerCase().includes(search.toLowerCase())
-  )
-
-  if (loading) {
-    return (
-      <div className="flex h-96 items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    )
+  function reset() {
+    setSelected(null)
+    setGeneratedBill(null)
+    setDiscount(0)
+    setDiscountReason("")
+    load()
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Billing</h1>
-          <p className="text-sm text-muted-foreground">Process payments and generate invoices</p>
-        </div>
-        <div className="relative w-64">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search by table or ID..."
-            className="pl-8"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Billing & Payments</h1>
+        <p className="text-sm text-muted-foreground">Counter</p>
       </div>
 
-      {filtered.length === 0 ? (
-        <div className="flex h-64 items-center justify-center rounded-lg border-2 border-dashed text-muted-foreground">
-          <div className="text-center">
-            <IndianRupee className="mx-auto h-12 w-12 mb-2 opacity-50" />
-            <p>No bills to process</p>
-          </div>
-        </div>
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-          {filtered.map((bill) => {
-            const items = (bill.items as Array<Record<string, unknown>>) || []
-            return (
-              <Card key={bill.id}>
-                <CardHeader className="p-4 pb-2">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-base">Table {bill.tableNumber}</CardTitle>
-                    <Badge variant="outline" className="text-xs">
-                      {bill.id.slice(-6)}
-                    </Badge>
-                  </div>
-                </CardHeader>
-                <CardContent className="p-4 pt-2">
-                  <div className="space-y-1.5">
-                    {items
-                      .filter((i) => i.status !== "cancelled")
-                      .map((item, i) => (
-                        <div key={i} className="flex justify-between text-sm">
-                          <span>
-                            {item.quantity as number}x {item.name as string}
-                          </span>
-                          <span>₹{(item.totalPrice as number).toFixed(2)}</span>
-                        </div>
-                      ))}
-                  </div>
-                  <Separator className="my-3" />
-                  <div className="space-y-1 text-sm">
-                    <div className="flex justify-between text-muted-foreground">
-                      <span>Subtotal</span>
-                      <span>₹{bill.totalAmount.toFixed(2)}</span>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_420px] gap-6">
+        <div className="space-y-6">
+          <section>
+            <h2 className="text-lg font-bold mb-3">Open orders to bill</h2>
+            <div className="space-y-2">
+              {orders.length === 0 && (
+                <div className="flex h-32 items-center justify-center rounded-lg border-2 border-dashed text-muted-foreground text-sm">
+                  No open orders
+                </div>
+              )}
+              {orders.map((o) => {
+                const sub = o.items
+                  .filter((i) => i.status !== "cancelled")
+                  .reduce((s, i) => s + i.totalPrice, 0)
+                const ready =
+                  o.items.length > 0 &&
+                  o.items
+                    .filter((i) => i.status !== "cancelled")
+                    .every((i) => i.status === "ready" || i.status === "served")
+                return (
+                  <button
+                    key={o.id}
+                    onClick={() => {
+                      setSelected(o)
+                      setGeneratedBill(null)
+                    }}
+                    className={`w-full text-left card p-4 flex items-center justify-between hover:border-primary transition rounded-lg border ${
+                      selected?.id === o.id
+                        ? "border-primary border-2"
+                        : "border-border"
+                    }`}
+                  >
+                    <div>
+                      <div className="text-lg font-bold">
+                        Table {o.tableNumber || "—"}
+                      </div>
+                      <div className="text-xs font-mono text-muted-foreground">
+                        #{o.orderNumber} &middot; {o.items.length} items
+                        {ready && (
+                          <Badge
+                            variant="outline"
+                            className="ml-2 text-xs bg-green-50 text-green-700 border-green-200"
+                          >
+                            ready
+                          </Badge>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex justify-between text-muted-foreground">
-                      <span>Tax (GST)</span>
-                      <span>₹{bill.taxAmount.toFixed(2)}</span>
-                    </div>
-                    <Separator className="my-1" />
-                    <div className="flex justify-between font-bold text-base">
-                      <span>Total</span>
-                      <span>₹{bill.grandTotal.toFixed(2)}</span>
-                    </div>
-                  </div>
-                  <div className="mt-4 flex gap-2">
-                    {bill.paymentStatus === "pending" && (
-                      <>
-                        <Button
-                          size="sm"
-                          className="flex-1"
-                          onClick={() => {
-                            setSelectedOrder(bill)
-                            setPaymentModal(true)
-                          }}
-                        >
-                          Pay Now
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="flex-1"
-                          onClick={() => handleGenerateBill(bill)}
-                        >
-                          <Printer className="mr-1.5 h-4 w-4" />
-                          Bill
-                        </Button>
-                      </>
-                    )}
-                    {bill.paymentStatus === "paid" && (
-                      <Badge variant="default" className="w-full justify-center bg-green-600">
-                        Paid - {bill.paymentMethod}
-                      </Badge>
-                    )}
-                    {bill.paymentStatus === "partial" && (
-                      <Badge variant="secondary" className="w-full justify-center">
-                        Partial Payment
-                      </Badge>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            )
-          })}
-        </div>
-      )}
+                    <div className="text-lg font-bold">{inr(sub)}</div>
+                  </button>
+                )
+              })}
+            </div>
+          </section>
 
-      <Dialog open={paymentModal} onOpenChange={setPaymentModal}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Select Payment Method</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3 py-4">
-            <div className="text-center">
-              <p className="text-3xl font-bold">₹{selectedOrder?.grandTotal.toFixed(2)}</p>
-              <p className="text-sm text-muted-foreground">Table {selectedOrder?.tableNumber}</p>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Button
-                variant="outline"
-                className="h-20 flex-col gap-1"
-                disabled={processing}
-                onClick={() => handlePayment("upi")}
-              >
-                <QrCode className="h-6 w-6" />
-                <span className="text-xs">UPI</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="h-20 flex-col gap-1"
-                disabled={processing}
-                onClick={() => handlePayment("card")}
-              >
-                <CreditCard className="h-6 w-6" />
-                <span className="text-xs">Card</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="h-20 flex-col gap-1"
-                disabled={processing}
-                onClick={() => handlePayment("netbanking")}
-              >
-                <CreditCard className="h-6 w-6" />
-                <span className="text-xs">Netbanking</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="h-20 flex-col gap-1"
-                disabled={processing}
-                onClick={() => handlePayment("cash")}
-              >
-                <Banknote className="h-6 w-6" />
-                <span className="text-xs">Cash</span>
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+          <section>
+            <h2 className="text-lg font-bold mb-3">Recent paid bills</h2>
+            <Card>
+              {bills.map((b) => (
+                <div
+                  key={b.id}
+                  className="px-4 py-3 flex items-center justify-between text-sm border-b last:border-b-0"
+                >
+                  <div>
+                    <div className="font-mono font-semibold">
+                      {b.paymentMethod}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Table {b.tableNumber ?? "—"} &middot; {b.paymentMethod}
+                    </div>
+                  </div>
+                  <div className="font-bold">{inr(b.grandTotal)}</div>
+                </div>
+              ))}
+              {bills.length === 0 && (
+                <div className="px-4 py-3 text-muted-foreground text-sm">
+                  No paid bills yet.
+                </div>
+              )}
+            </Card>
+          </section>
+        </div>
+
+        <div>
+          <Card className="p-5 sticky top-4">
+            {!selected && (
+              <p className="text-muted-foreground text-sm">
+                Pick an open order to start billing.
+              </p>
+            )}
+
+            {selected && !generatedBill && (
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                    draft bill
+                  </p>
+                  <h3 className="text-2xl font-bold">
+                    Table {selected.tableNumber}
+                  </h3>
+                </div>
+
+                <div className="space-y-1 max-h-[30vh] overflow-y-auto">
+                  {selected.items
+                    .filter((i) => i.status !== "cancelled")
+                    .map((i, idx) => (
+                      <div
+                        key={idx}
+                        className="flex justify-between text-sm py-1"
+                      >
+                        <span className="truncate">
+                          <span className="font-mono mr-2">&times;{i.quantity}</span>
+                          {i.name}
+                        </span>
+                        <span className="font-mono">{inr(i.totalPrice)}</span>
+                      </div>
+                    ))}
+                </div>
+
+                <Separator />
+
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span>Subtotal</span>
+                    <span className="font-mono">{inr(subtotal)}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={0}
+                      placeholder="Discount ₹"
+                      value={discount || ""}
+                      onChange={(e) =>
+                        setDiscount(Math.max(0, Number(e.target.value)))
+                      }
+                      className="text-sm"
+                    />
+                    <Input
+                      placeholder="Reason"
+                      value={discountReason}
+                      onChange={(e) => setDiscountReason(e.target.value)}
+                      className="text-sm"
+                    />
+                  </div>
+                  <div className="flex justify-between">
+                    <span>CGST 2.5%</span>
+                    <span className="font-mono">{inr(cgst)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>SGST 2.5%</span>
+                    <span className="font-mono">{inr(sgst)}</span>
+                  </div>
+                  <Separator />
+                  <div className="flex justify-between font-bold text-2xl pt-2">
+                    <span>Total</span>
+                    <span>{inr(total)}</span>
+                  </div>
+                </div>
+
+                <Button
+                  className="w-full"
+                  disabled={processing}
+                  onClick={generateBill}
+                >
+                  <Receipt className="mr-2 h-4 w-4" />
+                  Generate GST bill
+                </Button>
+              </div>
+            )}
+
+            {generatedBill && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-1 text-green-600 text-sm font-semibold">
+                  <CheckCircle className="h-4 w-4" />
+                  bill ready
+                </div>
+                <h3 className="text-2xl font-bold">
+                  {inr(generatedBill.grandTotal)}
+                </h3>
+                <p className="font-mono text-xs text-muted-foreground">
+                  {generatedBill.id.slice(-6)}
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    variant="outline"
+                    className="h-16 flex-col gap-1"
+                    disabled={processing}
+                    onClick={() => pay("cash")}
+                  >
+                    <Banknote className="h-5 w-5" />
+                    <span className="text-xs">Cash</span>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-16 flex-col gap-1"
+                    disabled={processing}
+                    onClick={() => pay("card")}
+                  >
+                    <CreditCard className="h-5 w-5" />
+                    <span className="text-xs">Card</span>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-16 flex-col gap-1"
+                    disabled={processing}
+                    onClick={() => pay("upi")}
+                  >
+                    <QrCode className="h-5 w-5" />
+                    <span className="text-xs">UPI</span>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-16 flex-col gap-1"
+                    disabled={processing}
+                    onClick={() => pay("netbanking")}
+                  >
+                    <ArrowLeftRight className="h-5 w-5" />
+                    <span className="text-xs">Netbanking</span>
+                  </Button>
+                </div>
+                <Button
+                  className="w-full"
+                  disabled={processing}
+                  onClick={payRazorpay}
+                >
+                  Pay with Razorpay
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="w-full text-xs"
+                  onClick={() => setGeneratedBill(null)}
+                >
+                  &larr; Back to edit
+                </Button>
+              </div>
+            )}
+          </Card>
+        </div>
+      </div>
     </div>
   )
 }
